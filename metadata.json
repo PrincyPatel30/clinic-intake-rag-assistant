@@ -1,0 +1,6 @@
+{
+  "name": "Dr. Butterfly Clinic",
+  "description": "Dr. Butterfly healthcare clinic with an intelligent popup chatbot powered by a backend Gemini RAG pipeline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
