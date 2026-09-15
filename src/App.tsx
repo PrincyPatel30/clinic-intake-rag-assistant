@@ -338,6 +338,111 @@ export default function App() {
         </div>
       </section>
 
+      {/* About the assistant. The nav has always linked to #about; until now
+          no such section existed, so the link silently did nothing. */}
+      <section id="about" className="py-16 sm:py-20 bg-white border-b border-slate-200">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6">
+          <div className="text-center space-y-2 mb-10">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-sky-100 text-sky-800 text-[11px] font-semibold tracking-wide uppercase">
+              <Sparkles className="w-3.5 h-3.5 text-sky-600" />
+              <span>About the Assistant</span>
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-bold text-slate-900">
+              An intake interview, not a diagnosis
+            </h2>
+            <p className="text-slate-600 max-w-2xl mx-auto leading-relaxed">
+              Our assistant asks the same questions a nurse would ask before your
+              appointment, so your clinician starts with a complete picture instead of a
+              blank form. It never names a condition and never suggests a treatment.
+            </p>
+          </div>
+
+          {/* The four stages the patient actually experiences */}
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
+            {[
+              {
+                step: '1',
+                title: 'Describe your symptom',
+                body: 'Tell it what is bothering you in your own words. No forms, no medical vocabulary required.',
+                icon: MessageSquare,
+              },
+              {
+                step: '2',
+                title: 'Duration & severity',
+                body: 'How long it has been going on, and how bad it is on a 1-10 scale. Pick an option or type your own.',
+                icon: Clock,
+              },
+              {
+                step: '3',
+                title: 'History & medications',
+                body: 'Anything you already take or react badly to. This is what your clinician most often has to chase up.',
+                icon: ShieldCheck,
+              },
+              {
+                step: '4',
+                title: 'Summary & routing',
+                body: 'A short pre-consultation summary, and which department fits your concern.',
+                icon: Calendar,
+              },
+            ].map(({ step, title, body, icon: Icon }) => (
+              <div
+                key={step}
+                className="relative p-5 rounded-2xl bg-slate-50 border border-slate-200 hover:border-sky-300 hover:shadow-md transition"
+              >
+                <div className="flex items-center gap-2.5 mb-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-sky-600 to-indigo-600 text-white flex items-center justify-center shadow-xs">
+                    <Icon className="w-4 h-4" />
+                  </div>
+                  <span className="text-[11px] font-bold text-sky-700 tracking-widest uppercase">
+                    Step {step}
+                  </span>
+                </div>
+                <h3 className="text-sm font-bold text-slate-900 mb-1">{title}</h3>
+                <p className="text-xs text-slate-600 leading-relaxed">{body}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* What it will and will not do -- stated plainly, side by side */}
+          <div className="grid md:grid-cols-2 gap-5">
+            <div className="p-6 rounded-2xl bg-emerald-50/70 border border-emerald-200">
+              <h3 className="flex items-center gap-2 text-sm font-bold text-emerald-900 mb-3">
+                <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                What it does
+              </h3>
+              <ul className="space-y-2 text-xs text-emerald-900/80 leading-relaxed">
+                <li>Asks follow-up questions drawn from our own clinical intake protocols</li>
+                <li>Flags emergency warning signs immediately and tells you to seek urgent care</li>
+                <li>Replaces names, dates and phone numbers with placeholders before processing</li>
+                <li>Prepares a summary your clinician can read in under a minute</li>
+              </ul>
+            </div>
+
+            <div className="p-6 rounded-2xl bg-amber-50/70 border border-amber-200">
+              <h3 className="flex items-center gap-2 text-sm font-bold text-amber-900 mb-3">
+                <Stethoscope className="w-4 h-4 text-amber-600" />
+                What it will not do
+              </h3>
+              <ul className="space-y-2 text-xs text-amber-900/80 leading-relaxed">
+                <li>Name a condition, or tell you what you have</li>
+                <li>Recommend a medication, a dose, or a treatment</li>
+                <li>Interpret photographs of wounds, rashes or X-rays</li>
+                <li>
+                  Answer from outside our protocols. If nothing matches your question, it
+                  says so rather than guessing.
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <p className="mt-6 text-center text-xs text-slate-500 max-w-2xl mx-auto leading-relaxed">
+            AI can make mistakes. Everything gathered here is reviewed by a qualified
+            clinician before any care decision is made, and nothing the assistant says is a
+            substitute for speaking to one.
+          </p>
+        </div>
+      </section>
+
       {/* Simple Footer */}
       <footer id="contact" className="bg-slate-900 text-slate-400 py-10 px-4 sm:px-6 mt-auto">
         <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-xs">

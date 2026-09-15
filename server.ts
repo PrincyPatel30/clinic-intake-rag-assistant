@@ -857,9 +857,47 @@ Would you like to schedule an in-person consultation or do you have any addition
     }
   }
 
+  // Quick replies come from the retrieved protocol chunk itself, not from the
+  // model. The corpus author wrote them alongside the question, so they are
+  // guaranteed to be answer options a clinician would actually accept -- and
+  // because they are data, not generation, they cannot hallucinate.
+  const topChunk = selectedCandidates[0]
+    ? retrieval.chunks.find((c) => c.id === selectedCandidates[0].chunkId)
+    : undefined;
+
+  const quickReplies = topChunk?.suggestedQuickReplies ?? [];
+
+  /**
+   * Which stage of the intake the patient is at.
+   *
+   * Derived from what has actually been established in the conversation rather
+   * than from a counter, so refreshing or rewording never desynchronises it:
+   * a stage is complete when the transcript contains the evidence for it.
+   */
+  function deriveStage(): { index: number; total: number; label: string } {
+    const said = combinedUserText.toLowerCase();
+    const hasDuration = /\b(day|days|week|weeks|month|months|year|years|yesterday|today|since|hour|hours)\b/.test(said);
+    const hasSeverity = /\b([1-9]|10)\s*(\/|out of)\s*10\b|\b(mild|moderate|severe|unbearable)\b/.test(said);
+    const hasHistory = /\b(medication|medicine|tablet|pill|allergic|allergy|diabet|hypertens|asthma|surgery|taking)\b/.test(said);
+
+    if (hasDuration && hasSeverity && hasHistory) {
+      return { index: 4, total: 4, label: 'Summary & routing' };
+    }
+    if (hasDuration && hasSeverity) return { index: 3, total: 4, label: 'Medical history' };
+    if (hasDuration || hasSeverity) return { index: 2, total: 4, label: 'Duration & severity' };
+    return { index: 1, total: 4, label: 'Describe your symptom' };
+  }
+
   res.json({
     response: reply,
     retrievedDocs,
+    quickReplies,
+    inputWidget: topChunk?.inputWidget ?? 'text',
+    stage: deriveStage(),
+    // True when nothing in the corpus was close enough to the question. The UI
+    // surfaces this so the patient can see the assistant is answering from
+    // general care guidance rather than from a clinical protocol.
+    offProtocol: retrieval.isLowConfidenceFallback,
     temperature: temp,
     model: modelUsed,
     isRedFlag: false,
