@@ -666,7 +666,16 @@ app.post('/api/chat', async (req, res) => {
   const { scrubbedText } = deidentifyText(query);
   const retrievalQuery = `${query} ${isDental ? 'oral surgery wisdom tooth' : isCardiac ? 'cardiology chest pain' : ''}`;
   const retrieval = await runHybridRetrieval(retrievalQuery, new Set());
-  const selectedCandidates = retrieval.candidates.slice(0, Number(topK) || 2);
+
+  // Apply the relevance floor. Vector search always returns a best match, even
+  // for a question the corpus knows nothing about -- "I slipped on the floor"
+  // happily retrieves an ankle-swelling cardiology question because both
+  // mention legs. Passing that to the model as "Retrieved Clinical Knowledge"
+  // invites it to steer the interview somewhere the protocols never covered.
+  // Below the floor we hand over NO context and let the model say so plainly.
+  const selectedCandidates = retrieval.isLowConfidenceFallback
+    ? []
+    : retrieval.candidates.slice(0, Number(topK) || 2);
 
   const retrievedDocs = selectedCandidates.map((c) => {
     const chunk = retrieval.chunks.find((item) => item.id === c.chunkId);
@@ -705,7 +714,9 @@ INVARIANT CLINICAL & CONVERSATIONAL RULES:
 5. NO FORMAL DIAGNOSES OR PRESCRIPTIONS: Focus purely on clinical intake, clarifying details, and appointment routing.
 
 Retrieved Clinical Knowledge (For internal guidance):
-${contextStr}
+${contextStr || `(Nothing in the clinical protocols covers this. Do NOT invent protocol
+guidance. Acknowledge the concern warmly, ask one plain clarifying question, and
+route them to the appropriate department or to in-person care.)`}
 
 Conversation History so far:
 ${historyTranscript || '(No prior history)'}
