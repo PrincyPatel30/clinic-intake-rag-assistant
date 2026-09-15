@@ -882,42 +882,11 @@ app.post('/api/medical/intake-summary', (req, res) => {
 });
 
 /**
- * The Express app is exported so it can run two different ways from one file:
+ * The Express app, exported and nothing else.
  *
- *   locally  -> startServer() below attaches Vite's dev middleware and listens
- *               on a port, so `pnpm dev` still gives hot reload.
- *   Vercel   -> api/index.ts imports this app and hands it straight to the
- *               serverless runtime. No port, no static file serving (Vercel's
- *               CDN serves dist/ itself), no Vite.
+ * Deployed, this file is loaded by api/index.ts inside a Vercel function. It
+ * therefore must not reference anything that only exists in development --
+ * notably Vite, which is a devDependency and is not installed in the deployed
+ * function. The local dev server lives in dev.ts for exactly that reason.
  */
 export default app;
-
-/**
- * Local development server. Skipped on Vercel, where there is no long-lived
- * process to listen on a port.
- */
-async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    // Imported lazily so Vite never ends up inside the serverless bundle.
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  }
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Clinic Intake RAG Assistant running on http://localhost:${PORT}`);
-  });
-}
-
-if (!process.env.VERCEL) {
-  startServer();
-}
