@@ -332,6 +332,65 @@ async function runHybridRetrieval(query, askedQuestionIds = /* @__PURE__ */ new 
   return { candidates, selectedChunk, isLowConfidenceFallback, chunks };
 }
 
+// src/lib/intakeTurn.ts
+var OPENING_OPTIONS = [
+  { label: "Chest discomfort", icon: "heart", specialty: "Cardiology", seed: "chest discomfort or tightness" },
+  { label: "Breathing trouble", icon: "wind", specialty: "Pulmonology", seed: "shortness of breath, difficulty breathing" },
+  { label: "Tooth or jaw pain", icon: "tooth", specialty: "Oral Surgery", seed: "wisdom tooth pain and jaw swelling" },
+  { label: "Skin or a mole", icon: "scan", specialty: "Dermatology", seed: "a mole or skin patch that has changed" },
+  { label: "Feeling unwell", icon: "thermometer", specialty: "General Practice", seed: "fever, chills, tiredness, feeling generally unwell" },
+  { label: "Swelling", icon: "droplet", specialty: "Cardiology", seed: "swollen ankles, feet or legs" }
+];
+var SLOT_LABELS = {
+  symptom_location: "Location",
+  symptom_radiation: "Spreads to",
+  severity_rating: "Severity",
+  symptom_onset: "Started",
+  provocative_factors: "Triggers",
+  associated_dyspnea: "Breathing",
+  peripheral_edema: "Swelling",
+  current_medications: "Medications",
+  allergies_history: "Allergies",
+  constitutional_symptoms: "Fever / weight",
+  past_medical_history: "History",
+  lesion_characteristics: "Skin changes",
+  reason_for_visit: "Reason for visit"
+};
+function slotLabel(slot) {
+  return SLOT_LABELS[slot] ?? slot.replace(/_/g, " ");
+}
+function widgetFor(chunk) {
+  switch (chunk.inputWidget) {
+    case "severity_scale":
+      return "severity";
+    case "yes_no_unsure":
+      return chunk.suggestedQuickReplies?.length ? "single_choice" : "yes_no";
+    case "body_map":
+      return "single_choice";
+    case "text":
+    default:
+      return chunk.suggestedQuickReplies?.length ? "single_choice" : "text";
+  }
+}
+function stageFor(slots) {
+  const has = (s) => Boolean(slots[s]);
+  const hasTiming = has("symptom_onset");
+  const hasSeverity = has("severity_rating");
+  const hasHistory = has("current_medications") || has("allergies_history") || has("past_medical_history");
+  if (hasTiming && hasSeverity && hasHistory) return { index: 4, total: 4, label: "Almost done" };
+  if (hasTiming && hasSeverity) return { index: 3, total: 4, label: "A bit of history" };
+  if (hasTiming || hasSeverity) return { index: 2, total: 4, label: "How it feels" };
+  return { index: 1, total: 4, label: "What brings you in" };
+}
+function buildSummary(slots) {
+  return Object.entries(slots).filter(([, v]) => v && v.trim()).map(([slot, value]) => ({ slot, label: slotLabel(slot), value }));
+}
+function isComplete(slots) {
+  const filled = Object.keys(slots).length;
+  const st = stageFor(slots);
+  return st.index >= 4 || filled >= 6;
+}
+
 // src/data/retrieval_eval_set.ts
 var RETRIEVAL_EVAL_SET = [
   // 1. Direct symptoms
@@ -1942,6 +2001,7 @@ function generatePreConsultationSummary(chiefConcern, duration, severityScore, a
 
 // server.ts
 var app = express();
+var CHAT_MODEL = process.env.CHAT_MODEL || "gemini-3.8-flash";
 app.use(express.json({ limit: "10mb" }));
 function isGeminiKeyValid() {
   const key = process.env.GEMINI_API_KEY;
@@ -2624,6 +2684,164 @@ app.post("/api/medical/intake-summary", (req, res) => {
   res.json(voucher);
 });
 var server_default = app;
+app.post("/api/intake/turn", async (req, res) => {
+  const started = Date.now();
+  const {
+    answer = "",
+    slots = {},
+    askedChunkIds = [],
+    specialty = null,
+    transcript = []
+  } = req.body ?? {};
+  const reply = String(answer).trim();
+  const currentSlots = { ...slots };
+  if (reply) {
+    const flag = evaluateRedFlags(reply);
+    if (flag.hasRedFlag) {
+      return res.json({
+        acknowledgement: "",
+        question: flag.emergencyActionText,
+        widget: "summary",
+        options: [],
+        summary: buildSummary(currentSlots),
+        stage: stageFor(currentSlots),
+        chunkId: null,
+        specialty,
+        offProtocol: false,
+        done: true,
+        redFlag: { text: flag.emergencyActionText, phrase: flag.detectedPhrase || reply },
+        latencyMs: Date.now() - started
+      });
+    }
+  }
+  if (!reply && Object.keys(currentSlots).length === 0) {
+    return res.json({
+      acknowledgement: "",
+      question: "What brings you in today?",
+      widget: "symptom_picker",
+      options: OPENING_OPTIONS.map((o) => o.label),
+      summary: [],
+      stage: stageFor({}),
+      chunkId: null,
+      specialty: null,
+      offProtocol: false,
+      done: false,
+      latencyMs: Date.now() - started
+    });
+  }
+  if (isComplete(currentSlots)) {
+    return res.json({
+      acknowledgement: "Thanks \u2014 that gives your care team a clear picture.",
+      question: "Here is what I have. Does this look right?",
+      widget: "summary",
+      options: ["Looks right", "Change something"],
+      summary: buildSummary(currentSlots),
+      stage: { index: 4, total: 4, label: "Done" },
+      chunkId: null,
+      specialty,
+      offProtocol: false,
+      done: true,
+      latencyMs: Date.now() - started
+    });
+  }
+  const opening = OPENING_OPTIONS.find((o) => o.label === reply);
+  const activeSpecialty = opening ? opening.specialty : specialty;
+  const queryText = opening ? opening.seed : [
+    ...Object.entries(currentSlots).map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`),
+    reply
+  ].filter(Boolean).join(". ");
+  let retrieval;
+  try {
+    retrieval = await runHybridRetrieval(
+      queryText,
+      /* @__PURE__ */ new Set(),
+      activeSpecialty ?? void 0
+    );
+  } catch (err) {
+    console.error("[intake/turn] retrieval failed:", err);
+    return res.status(502).json({ error: "retrieval_failed" });
+  }
+  const asked = new Set(askedChunkIds);
+  const nextCandidate = retrieval.candidates.find(
+    (c) => !c.excludedReason && !asked.has(c.chunkId)
+  );
+  const chunk = nextCandidate ? retrieval.chunks.find((c) => c.id === nextCandidate.chunkId) : void 0;
+  if (!chunk || retrieval.isLowConfidenceFallback) {
+    const noneLeft = !chunk;
+    return res.json({
+      acknowledgement: noneLeft ? "Thanks \u2014 I think I have what I need." : "",
+      question: noneLeft ? "Here is what I have. Does this look right?" : "I don't have a clinical protocol covering that one, so I'd rather not guess. Could you describe the main thing that brought you in today?",
+      widget: noneLeft ? "summary" : "text",
+      options: noneLeft ? ["Looks right", "Change something"] : [],
+      summary: buildSummary(currentSlots),
+      stage: stageFor(currentSlots),
+      chunkId: null,
+      specialty: activeSpecialty,
+      offProtocol: !noneLeft,
+      done: noneLeft,
+      latencyMs: Date.now() - started
+    });
+  }
+  let acknowledgement = "";
+  let question = chunk.questionText;
+  if (isGeminiKeyValid() && reply) {
+    try {
+      const ai = getGeminiClient();
+      const { scrubbedText } = deidentifyText(reply);
+      const result = await ai.models.generateContent({
+        model: CHAT_MODEL,
+        contents: `The patient just said: "${scrubbedText}"
+
+The next question from our clinical intake protocol is:
+"${chunk.questionText}"
+
+Return JSON with two fields:
+- "ack": a SHORT acknowledgement of what they just said. Six words or fewer.
+  Natural and warm, never gushing. Good: "Got it \u2014 headache." / "Thanks, that helps."
+  / "Okay, since yesterday." Bad: "I'm so sorry you're experiencing this!"
+  Use "" if an acknowledgement would feel forced.
+- "question": the protocol question above, rephrased in plain, friendly language.
+  Keep its clinical meaning exactly. One sentence. Do not add new questions,
+  do not give advice, do not name any condition.`,
+        config: {
+          temperature: 0.4,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              ack: { type: Type.STRING },
+              question: { type: Type.STRING }
+            },
+            required: ["ack", "question"]
+          }
+        }
+      });
+      const parsed = JSON.parse(result.text ?? "{}");
+      if (typeof parsed.ack === "string") acknowledgement = parsed.ack.trim();
+      if (typeof parsed.question === "string" && parsed.question.trim()) {
+        const candidate = parsed.question.trim();
+        question = candidate.length > 20 && candidate.length < 400 ? candidate : chunk.questionText;
+      }
+    } catch (err) {
+      console.error("[intake/turn] phrasing failed, using protocol text:", err);
+    }
+  }
+  res.json({
+    acknowledgement,
+    question,
+    widget: widgetFor(chunk),
+    // Options always come from the corpus, never from the model.
+    options: chunk.suggestedQuickReplies ?? [],
+    targetSlot: chunk.targetSlot,
+    summary: buildSummary(currentSlots),
+    stage: stageFor(currentSlots),
+    chunkId: chunk.id,
+    specialty: chunk.specialty,
+    offProtocol: false,
+    done: false,
+    latencyMs: Date.now() - started
+  });
+});
 export {
   server_default as default
 };

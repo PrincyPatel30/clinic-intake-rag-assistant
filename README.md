@@ -2,8 +2,6 @@
 
 A patient intake chatbot built with the RAG (Retrieval-Augmented Generation) approach, with one twist: **retrieval decides what the assistant asks next, not what it answers.**
 
-**Live demo:** https://clinic-intake-rag-assistant.vercel.app
-
 ---
 
 ## What it does
@@ -13,6 +11,28 @@ A patient describes how they feel in plain language. Instead of answering with m
 After a few turns it produces a structured pre-consultation summary the clinician can read in under a minute, with every answer traceable back to the exact patient sentence and protocol chunk that produced it.
 
 It never diagnoses, never prescribes, and says so plainly when the question falls outside its protocols.
+
+---
+
+## What the patient sees
+
+**Answer cards, not a blank box.** Each protocol chunk ships with four suggested
+answers written alongside the question, so the assistant offers them as pick-one cards.
+They come from the corpus rather than the model, which means they cannot be
+hallucinated — and most patients would rather tap "Worse with exertion / better with
+rest" than compose that sentence themselves. Free text still works for anything the
+options do not cover.
+
+**A four-stage tracker** — Symptom, Duration & severity, History, Summary — so the
+patient can see how much is left. The stage is derived from what the conversation has
+actually established, not from a turn counter, so it cannot drift out of sync with
+reality.
+
+**Visible grounding.** Every reply is labelled with the protocol specialty it came
+from, or carries an explicit "no clinical protocol matched" badge when it falls below
+the relevance floor. In that case the answer cards are suppressed: offering canned
+answers to a question the corpus never covered is precisely the misleading behaviour
+the floor exists to prevent.
 
 ---
 

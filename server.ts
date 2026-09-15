@@ -7,6 +7,13 @@ import { evaluateRedFlags, validateBotOutputSafety } from './src/lib/safetyGuard
 import { deidentifyText } from './src/lib/deidentifier';
 import { runHybridRetrieval } from './src/lib/retrieval';
 import { isSupabaseConfigured } from './src/lib/supabaseClient';
+import {
+  OPENING_OPTIONS,
+  buildSummary,
+  isComplete,
+  stageFor,
+  widgetFor,
+} from './src/lib/intakeTurn';
 import { CLINICAL_CHUNKS } from './src/data/protocols';
 import { RETRIEVAL_EVAL_SET } from './src/data/retrieval_eval_set';
 import { routePatientUtterance, runBenchmarkEvaluation } from './src/lib/careRouter';
@@ -16,6 +23,9 @@ import { REALISTIC_MEDICAL_DOCS } from './src/data/medicalCorpus';
 
 const app = express();
 const PORT = 3000;
+
+/** Single source of truth for the chat model, rather than a string repeated inline. */
+const CHAT_MODEL = process.env.CHAT_MODEL || 'gemini-3.8-flash';
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -939,3 +949,205 @@ app.post('/api/medical/intake-summary', (req, res) => {
  * function. The local dev server lives in dev.ts for exactly that reason.
  */
 export default app;
+
+/**
+ * Structured intake turn — the endpoint behind the guided conversation UI.
+ *
+ * Differs from /api/chat in what it returns: not a paragraph of prose, but the
+ * question plus the control the patient should answer it with. Gemini is used
+ * only to write a short acknowledgement and to phrase the retrieved question
+ * naturally; it never chooses the question and never invents the options.
+ * That keeps the clinical content grounded in the corpus and, incidentally,
+ * makes the turn much faster than generating an essay each time.
+ */
+app.post('/api/intake/turn', async (req, res) => {
+  const started = Date.now();
+  const {
+    answer = '',
+    slots = {},
+    askedChunkIds = [],
+    specialty = null,
+    transcript = [],
+  } = req.body ?? {};
+
+  const reply = String(answer).trim();
+  const currentSlots: Record<string, string> = { ...slots };
+
+  // ---- 1. Emergency guard. Deterministic, before anything else. ------------
+  if (reply) {
+    const flag = evaluateRedFlags(reply);
+    if (flag.hasRedFlag) {
+      return res.json({
+        acknowledgement: '',
+        question: flag.emergencyActionText,
+        widget: 'summary',
+        options: [],
+        summary: buildSummary(currentSlots),
+        stage: stageFor(currentSlots),
+        chunkId: null,
+        specialty,
+        offProtocol: false,
+        done: true,
+        redFlag: { text: flag.emergencyActionText, phrase: flag.detectedPhrase || reply },
+        latencyMs: Date.now() - started,
+      });
+    }
+  }
+
+  // ---- 2. Opening screen. Nothing said yet, so nothing to embed. ----------
+  if (!reply && Object.keys(currentSlots).length === 0) {
+    return res.json({
+      acknowledgement: '',
+      question: 'What brings you in today?',
+      widget: 'symptom_picker',
+      options: OPENING_OPTIONS.map((o) => o.label),
+      summary: [],
+      stage: stageFor({}),
+      chunkId: null,
+      specialty: null,
+      offProtocol: false,
+      done: false,
+      latencyMs: Date.now() - started,
+    });
+  }
+
+  // ---- 3. Finished? Hand back the summary rather than keep asking. --------
+  if (isComplete(currentSlots)) {
+    return res.json({
+      acknowledgement: 'Thanks — that gives your care team a clear picture.',
+      question: 'Here is what I have. Does this look right?',
+      widget: 'summary',
+      options: ['Looks right', 'Change something'],
+      summary: buildSummary(currentSlots),
+      stage: { index: 4, total: 4, label: 'Done' },
+      chunkId: null,
+      specialty,
+      offProtocol: false,
+      done: true,
+      latencyMs: Date.now() - started,
+    });
+  }
+
+  // ---- 4. Retrieval picks the next question. ------------------------------
+  // The opening choice seeds a richer query than the label alone: "Chest
+  // discomfort" embeds far better as "chest discomfort or tightness".
+  const opening = OPENING_OPTIONS.find((o) => o.label === reply);
+  const activeSpecialty: string | null = opening ? opening.specialty : specialty;
+  const queryText = opening
+    ? opening.seed
+    : [
+        ...Object.entries(currentSlots).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`),
+        reply,
+      ]
+        .filter(Boolean)
+        .join('. ');
+
+  let retrieval;
+  try {
+    retrieval = await runHybridRetrieval(
+      queryText,
+      new Set<string>(),
+      activeSpecialty ?? undefined
+    );
+  } catch (err) {
+    console.error('[intake/turn] retrieval failed:', err);
+    return res.status(502).json({ error: 'retrieval_failed' });
+  }
+
+  // Exclude chunks already asked. Done here rather than in SQL so the client
+  // stays the single source of truth for what this session has covered.
+  const asked = new Set<string>(askedChunkIds);
+  const nextCandidate = retrieval.candidates.find(
+    (c) => !c.excludedReason && !asked.has(c.chunkId)
+  );
+  const chunk = nextCandidate
+    ? retrieval.chunks.find((c) => c.id === nextCandidate.chunkId)
+    : undefined;
+
+  // Nothing relevant left: wrap up rather than force an unrelated question.
+  if (!chunk || retrieval.isLowConfidenceFallback) {
+    const noneLeft = !chunk;
+    return res.json({
+      acknowledgement: noneLeft ? 'Thanks — I think I have what I need.' : '',
+      question: noneLeft
+        ? 'Here is what I have. Does this look right?'
+        : "I don't have a clinical protocol covering that one, so I'd rather not guess. Could you describe the main thing that brought you in today?",
+      widget: noneLeft ? 'summary' : 'text',
+      options: noneLeft ? ['Looks right', 'Change something'] : [],
+      summary: buildSummary(currentSlots),
+      stage: stageFor(currentSlots),
+      chunkId: null,
+      specialty: activeSpecialty,
+      offProtocol: !noneLeft,
+      done: noneLeft,
+      latencyMs: Date.now() - started,
+    });
+  }
+
+  // ---- 5. Gemini writes only the acknowledgement + phrasing. --------------
+  let acknowledgement = '';
+  let question = chunk.questionText;
+
+  if (isGeminiKeyValid() && reply) {
+    try {
+      const ai = getGeminiClient();
+      const { scrubbedText } = deidentifyText(reply);
+      const result = await ai.models.generateContent({
+        model: CHAT_MODEL,
+        contents: `The patient just said: "${scrubbedText}"
+
+The next question from our clinical intake protocol is:
+"${chunk.questionText}"
+
+Return JSON with two fields:
+- "ack": a SHORT acknowledgement of what they just said. Six words or fewer.
+  Natural and warm, never gushing. Good: "Got it — headache." / "Thanks, that helps."
+  / "Okay, since yesterday." Bad: "I'm so sorry you're experiencing this!"
+  Use "" if an acknowledgement would feel forced.
+- "question": the protocol question above, rephrased in plain, friendly language.
+  Keep its clinical meaning exactly. One sentence. Do not add new questions,
+  do not give advice, do not name any condition.`,
+        config: {
+          temperature: 0.4,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              ack: { type: Type.STRING },
+              question: { type: Type.STRING },
+            },
+            required: ['ack', 'question'],
+          },
+        },
+      });
+
+      const parsed = JSON.parse(result.text ?? '{}');
+      if (typeof parsed.ack === 'string') acknowledgement = parsed.ack.trim();
+      if (typeof parsed.question === 'string' && parsed.question.trim()) {
+        const candidate = parsed.question.trim();
+        // Guard the rephrasing: if the model returns something suspiciously
+        // long or empty, fall back to the protocol's own wording. The corpus
+        // text is always safe; a generated rewrite is not guaranteed to be.
+        question = candidate.length > 20 && candidate.length < 400 ? candidate : chunk.questionText;
+      }
+    } catch (err) {
+      console.error('[intake/turn] phrasing failed, using protocol text:', err);
+    }
+  }
+
+  res.json({
+    acknowledgement,
+    question,
+    widget: widgetFor(chunk),
+    // Options always come from the corpus, never from the model.
+    options: chunk.suggestedQuickReplies ?? [],
+    targetSlot: chunk.targetSlot,
+    summary: buildSummary(currentSlots),
+    stage: stageFor(currentSlots),
+    chunkId: chunk.id,
+    specialty: chunk.specialty,
+    offProtocol: false,
+    done: false,
+    latencyMs: Date.now() - started,
+  });
+});
