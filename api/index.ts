@@ -6,6 +6,15 @@
  * locally, so there is one set of route handlers rather than one for dev and
  * one for production.
  *
+ * It imports ./_server.js -- a single self-contained bundle that the build step
+ * produces from server.ts with esbuild. That indirection exists because this
+ * project uses `"type": "module"` with `moduleResolution: "bundler"`: Vercel
+ * transpiles each file rather than bundling, so an extensionless cross-directory
+ * import like `../server` emits unchanged and Node ESM cannot resolve it at
+ * runtime (ERR_MODULE_NOT_FOUND on /var/task/server). Bundling first means the
+ * function has exactly one relative import, with an explicit extension, to a
+ * sibling file.
+ *
  * The app is imported lazily inside the handler rather than at module scope.
  * If loading it throws — a missing dependency, a bad environment variable read
  * at import time — a top-level import would kill the whole function and Vercel
@@ -24,7 +33,7 @@ let cachedApp: ExpressLike | null = null;
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   try {
     if (!cachedApp) {
-      const mod = await import('../server');
+      const mod = await import('./_server.js');
       cachedApp = mod.default as unknown as ExpressLike;
     }
     return cachedApp(req, res);
